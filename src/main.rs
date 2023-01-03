@@ -3,12 +3,11 @@
 use anyhow::{Context, Result};
 use clap::{crate_description, crate_name, crate_version, Parser, ValueHint};
 use core::fmt;
-use std::env;
 use std::error::Error;
-use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process;
+use std::{env, fs};
 use subparse::timetypes::{TimeDelta, TimePoint, TimeSpan};
 use subparse::{SrtFile, SubtitleEntry, SubtitleFileInterface};
 
@@ -93,15 +92,20 @@ fn try_main() -> Result<()> {
     let options = Args::parse();
 
     let input_string = match options.input {
-        Some(input) => {
-            let subtitle_file = File::open(&input).with_context(|| {
-                format!("Could not open `{}' for reading.", input.to_string_lossy())
-            })?;
-            io::read_to_string(subtitle_file)
+        Some(input) => fs::read_to_string(&input).with_context(|| {
+            format!(
+                "Could not read subtitles from file `{}'",
+                input.to_string_lossy()
+            )
+        })?,
+        None => {
+            let mut result = String::new();
+            io::stdin()
+                .read_to_string(&mut result)
+                .context("Could not read subtitles from stdin")?;
+            result
         }
-        None => io::read_to_string(io::stdin()),
-    }
-    .context("Could not read input file into string")?;
+    };
 
     let subtitles = SrtFile::parse(&input_string)
         .map_err(|e| SubtitleError(e))
@@ -120,23 +124,17 @@ fn try_main() -> Result<()> {
         .context("Could not create subtitle data")?;
 
     match options.output {
-        Some(output) => {
-            // Write to file.
-            let mut subtitle_file = File::create(&output).with_context(|| {
-                format!("Could not open `{}' for writing.", output.to_string_lossy())
-            })?;
-            subtitle_file.write_all(&subtitle_data).with_context(|| {
-                format!(
-                    "Could not write subtitles to `{}'.",
-                    output.to_string_lossy()
-                )
-            })?;
-        }
+        Some(output) => fs::write(&output, &subtitle_data).with_context(|| {
+            format!(
+                "Could not write subtitles to file `{}'",
+                output.to_string_lossy()
+            )
+        })?,
         None => {
             // Write to stdout.
             io::stdout()
                 .write_all(&subtitle_data)
-                .context("Could not write subtitles to stdout.")?;
+                .context("Could not write subtitles to stdout")?;
         }
     }
 
