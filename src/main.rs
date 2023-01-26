@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use clap::{crate_description, crate_name, crate_version, Parser, ValueHint};
 use core::fmt;
 use std::error::Error;
@@ -27,17 +27,22 @@ impl Error for SubtitleError {
     }
 }
 
+fn parse_range<T, U>(s: &str) -> Result<(T, U), Box<dyn Error + Send + Sync + 'static>>
+where
+    T: std::str::FromStr,
+    T::Err: Error + Send + Sync + 'static,
+    U: std::str::FromStr,
+    U::Err: Error + Send + Sync + 'static,
+{
+    let pos = s
+        .find('-')
+        .ok_or_else(|| format!("invalid KEY=value: no `-` found in `{}`", s))?;
+    Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
+}
+
 #[derive(Parser, Debug)]
 #[command(name = crate_name!(), about = crate_description!(), version = crate_version!())]
 pub struct Args {
-    /// Time from start in seconds. May be negative.
-    #[arg(short = 's', long)]
-    pub start: f64,
-
-    /// Duration of clip in seconds.
-    #[arg(short = 'd', long)]
-    pub duration: f64,
-
     /// Output subtitle file; stdout if not present.
     #[arg(short = 'o', long, value_hint = ValueHint::FilePath)]
     pub output: Option<PathBuf>,
@@ -45,13 +50,18 @@ pub struct Args {
     /// Input subtitle file; stdin if not present.
     #[arg(short = 'i', long, value_hint = ValueHint::FilePath)]
     pub input: Option<PathBuf>,
+
+    /// Blocks, from start to finish.
+    #[arg(required=true, value_parser=parse_range::<f64, f64>)]
+    pub blocks: Vec<(f64, f64)>,
 }
 
 fn trim_subtitles(
-    subtitles: Vec<SubtitleEntry>,
+    subtitles: &Vec<SubtitleEntry>,
     start: f64,
     duration: f64,
-) -> Vec<(TimeSpan, String)> {
+    new_subtitles: &mut Vec<(TimeSpan, std::string::String)>,
+) {
     let start_delta =
         TimeDelta::from_components(0, 0, start.trunc() as i64, (start.fract() * 1000.0) as i64);
     let end_point = TimePoint::from_components(
@@ -60,24 +70,30 @@ fn trim_subtitles(
         duration.trunc() as i64,
         (duration.fract() * 1000.0) as i64,
     );
-    subtitles
-        .into_iter()
-        .filter_map(|entry| {
-            let mut new_timespan = entry.timespan - start_delta;
-            if new_timespan.end.is_negative() || new_timespan.start >= end_point {
-                return None;
-            }
-            if new_timespan.start.is_negative() {
-                new_timespan =
-                    TimeSpan::new(TimePoint::from_components(0, 0, 0, 0), new_timespan.end);
-            }
-            if new_timespan.end > end_point {
-                new_timespan = TimeSpan::new(new_timespan.start, end_point);
-            }
-            let line = entry.line.unwrap_or_else(|| String::new());
-            Some((new_timespan, line))
-        })
-        .collect()
+    new_subtitles.extend(subtitles.into_iter().filter_map(|entry| {
+        let mut new_timespan = entry.timespan - start_delta;
+        if new_timespan.end.is_negative() || new_timespan.start >= end_point {
+            return None;
+        }
+        if new_timespan.start.is_negative() {
+            new_timespan = TimeSpan::new(TimePoint::from_components(0, 0, 0, 0), new_timespan.end);
+        }
+        if new_timespan.end > end_point {
+            new_timespan = TimeSpan::new(new_timespan.start, end_point);
+        }
+        let line = entry.line.clone().unwrap_or_else(|| String::new());
+        Some((new_timespan, line))
+    }));
+}
+
+fn validate_blocks(blocks: &[(f64, f64)]) -> Result<()> {
+    let mut time = 0.0;
+    for block in blocks {
+        ensure!(block.0 < block.1);
+        ensure!(time <= block.0);
+        time = block.1;
+    }
+    Ok(())
 }
 
 fn try_main() -> Result<()> {
@@ -90,6 +106,9 @@ fn try_main() -> Result<()> {
             .join(" ")
     );
     let options = Args::parse();
+
+    // Validate blocks are in sequence and disjoint.
+    validate_blocks(&options.blocks)?;
 
     let input_string = match options.input {
         Some(input) => fs::read_to_string(&input).with_context(|| {
@@ -114,9 +133,12 @@ fn try_main() -> Result<()> {
         .map_err(|e| SubtitleError(e))
         .context("Could not retrieve subtitle entries")?;
 
-    let subtitles = trim_subtitles(subtitles, options.start, options.duration);
+    let mut new_subtitles = Vec::new();
+    for block in options.blocks {
+        trim_subtitles(&subtitles, block.0, block.1, &mut new_subtitles);
+    }
 
-    let subtitle_data = SrtFile::create(subtitles)
+    let subtitle_data = SrtFile::create(new_subtitles)
         .map_err(|e| SubtitleError(e))
         .context("Could not create subtitles from data")?
         .to_data()

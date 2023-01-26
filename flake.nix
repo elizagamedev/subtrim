@@ -30,7 +30,7 @@
         defaultPackage = myRustBuild;
         devShell = pkgs.mkShell {
           buildInputs =
-            [ (rustVersion.override { extensions = [ "rust-src" ]; }) ];
+            [ (rustVersion.override { extensions = [ "rust-src" "rust-analyzer" ]; }) ];
         };
       });
 }
