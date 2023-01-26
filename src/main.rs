@@ -35,8 +35,8 @@ where
     U::Err: Error + Send + Sync + 'static,
 {
     let pos = s
-        .find('-')
-        .ok_or_else(|| format!("invalid KEY=value: no `-` found in `{}`", s))?;
+        .find(',')
+        .ok_or_else(|| format!("invalid KEY=value: no `,` found in `{}`", s))?;
     Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
 }
 
@@ -61,22 +61,24 @@ fn trim_subtitles(
     start: f64,
     duration: f64,
     new_subtitles: &mut Vec<(TimeSpan, std::string::String)>,
-) {
+    start_point: TimePoint,
+) -> TimePoint {
     let start_delta =
-        TimeDelta::from_components(0, 0, start.trunc() as i64, (start.fract() * 1000.0) as i64);
-    let end_point = TimePoint::from_components(
+        TimeDelta::from_components(0, 0, start.trunc() as i64, (start.fract() * 1000.0) as i64)
+            - (start_point - TimePoint::from_components(0, 0, 0, 0));
+    let end_point = TimeDelta::from_components(
         0,
         0,
         duration.trunc() as i64,
         (duration.fract() * 1000.0) as i64,
-    );
+    ) + start_point;
     new_subtitles.extend(subtitles.into_iter().filter_map(|entry| {
         let mut new_timespan = entry.timespan - start_delta;
-        if new_timespan.end.is_negative() || new_timespan.start >= end_point {
+        if new_timespan.end < start_point || new_timespan.start >= end_point {
             return None;
         }
-        if new_timespan.start.is_negative() {
-            new_timespan = TimeSpan::new(TimePoint::from_components(0, 0, 0, 0), new_timespan.end);
+        if new_timespan.start < start_point {
+            new_timespan = TimeSpan::new(start_point, new_timespan.end);
         }
         if new_timespan.end > end_point {
             new_timespan = TimeSpan::new(new_timespan.start, end_point);
@@ -84,14 +86,15 @@ fn trim_subtitles(
         let line = entry.line.clone().unwrap_or_else(|| String::new());
         Some((new_timespan, line))
     }));
+    return end_point;
 }
 
 fn validate_blocks(blocks: &[(f64, f64)]) -> Result<()> {
     let mut time = 0.0;
     for block in blocks {
-        ensure!(block.0 < block.1);
+        ensure!(block.1 > 0.0);
         ensure!(time <= block.0);
-        time = block.1;
+        time = block.0 + block.1;
     }
     Ok(())
 }
@@ -134,8 +137,15 @@ fn try_main() -> Result<()> {
         .context("Could not retrieve subtitle entries")?;
 
     let mut new_subtitles = Vec::new();
+    let mut start_point = TimePoint::from_components(0, 0, 0, 0);
     for block in options.blocks {
-        trim_subtitles(&subtitles, block.0, block.1, &mut new_subtitles);
+        start_point = trim_subtitles(
+            &subtitles,
+            block.0,
+            block.1,
+            &mut new_subtitles,
+            start_point,
+        );
     }
 
     let subtitle_data = SrtFile::create(new_subtitles)
